@@ -4,6 +4,7 @@ const cors = require("cors");
 const hotelRoutes = require("./routes/hotel.routes");
 const visitorRoutes = require("./routes/visitor.routes");
 const statsRoutes = require("./routes/stats.routes");
+const footfallRoutes = require("./routes/footfall.routes");
 
 require("dotenv").config();
 
@@ -11,8 +12,8 @@ const PORT = process.env.PORT || 5000;
 const app = express();
 
 app.use(
-  cors({ 
-    origin: "*", 
+  cors({
+    origin: "*",
   })
 );
 app.use(express.json());
@@ -23,6 +24,7 @@ connectDb();
 app.use("/hotel", hotelRoutes);
 app.use("/visitor", visitorRoutes);
 app.use("/dashboard", statsRoutes);
+app.use("/api", footfallRoutes);
 
 app.get("/", (req, res, next) => {
   res.send("API is running...");
