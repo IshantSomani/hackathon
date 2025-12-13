@@ -4515,12 +4515,6 @@ const hotelsBase = [
   },
 ];
 
-/* ------------------ UTIL ------------------ */
-const generateRoomData = () => {
-  const totalRooms = Math.floor(Math.random() * 100) + 20;
-  const vacancy = Math.floor(Math.random() * totalRooms);
-  return { totalRooms, vacancy };
-};
 
 /* ------------------ ROUTES ------------------ */
 
