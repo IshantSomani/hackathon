@@ -4695,14 +4695,33 @@ router.get("/list", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 /**
  * 🔹 GET /hotel/analytics/city
- * City-wise analytics dashboard
+ * Supports filtering by city & minRating
  */
 router.get("/analytics/city", async (req, res) => {
   try {
+    const { city, minRating } = req.query;
+
+    /* ================= MATCH FILTER ================= */
+    const matchStage = {};
+
+    if (city) {
+      matchStage.City = city;
+    }
+
+    if (minRating) {
+      matchStage.Rating = { $gte: Number(minRating) };
+    }
+
     const analytics = await Hotel.aggregate([
-      // Group by City + Category
+      /* 🔥 APPLY FILTER FIRST */
+      {
+        $match: matchStage,
+      },
+
+      /* Group by City + Category */
       {
         $group: {
           _id: {
@@ -4716,7 +4735,7 @@ router.get("/analytics/city", async (req, res) => {
         },
       },
 
-      // Group again by City
+      /* Group again by City */
       {
         $group: {
           _id: "$_id.city",
@@ -4733,7 +4752,7 @@ router.get("/analytics/city", async (req, res) => {
         },
       },
 
-      // Calculate occupancy %
+      /* Calculate occupancy % */
       {
         $addFields: {
           occupancyPercent: {
@@ -4761,7 +4780,7 @@ router.get("/analytics/city", async (req, res) => {
         },
       },
 
-      // Final shape
+      /* Final shape */
       {
         $project: {
           _id: 0,
@@ -4775,7 +4794,7 @@ router.get("/analytics/city", async (req, res) => {
         },
       },
 
-      // Sort by hotel count
+      /* Sort by hotel count */
       { $sort: { totalHotels: -1 } },
     ]);
 
