@@ -4695,5 +4695,100 @@ router.get("/list", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+/**
+ * 🔹 GET /hotel/analytics/city
+ * City-wise analytics dashboard
+ */
+router.get("/analytics/city", async (req, res) => {
+  try {
+    const analytics = await Hotel.aggregate([
+      // Group by City + Category
+      {
+        $group: {
+          _id: {
+            city: "$City",
+            category: "$category",
+          },
+          count: { $sum: 1 },
+          avgRating: { $avg: "$Rating" },
+          totalRooms: { $sum: { $ifNull: ["$totalRooms", 0] } },
+          totalVacancy: { $sum: { $ifNull: ["$vacancy", 0] } },
+        },
+      },
+
+      // Group again by City
+      {
+        $group: {
+          _id: "$_id.city",
+          totalHotels: { $sum: "$count" },
+          avgRating: { $avg: "$avgRating" },
+          totalRooms: { $sum: "$totalRooms" },
+          totalVacancy: { $sum: "$totalVacancy" },
+          categories: {
+            $push: {
+              category: "$_id.category",
+              count: "$count",
+            },
+          },
+        },
+      },
+
+      // Calculate occupancy %
+      {
+        $addFields: {
+          occupancyPercent: {
+            $cond: [
+              { $eq: ["$totalRooms", 0] },
+              0,
+              {
+                $round: [
+                  {
+                    $multiply: [
+                      {
+                        $divide: [
+                          { $subtract: ["$totalRooms", "$totalVacancy"] },
+                          "$totalRooms",
+                        ],
+                      },
+                      100,
+                    ],
+                  },
+                  1,
+                ],
+              },
+            ],
+          },
+        },
+      },
+
+      // Final shape
+      {
+        $project: {
+          _id: 0,
+          city: "$_id",
+          totalHotels: 1,
+          avgRating: { $round: ["$avgRating", 2] },
+          totalRooms: 1,
+          totalVacancy: 1,
+          occupancyPercent: 1,
+          categories: 1,
+        },
+      },
+
+      // Sort by hotel count
+      { $sort: { totalHotels: -1 } },
+    ]);
+
+    res.json({
+      success: true,
+      data: analytics,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
 
 module.exports = router;
