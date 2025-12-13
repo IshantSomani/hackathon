@@ -2,6 +2,7 @@ const express = require("express");
 const connectDb = require("./config/db");
 const cors = require("cors");
 const hotelRoutes = require("./routes/hotel.routes");
+const visitorRoutes = require("./routes/visitor.routes");
 
 require("dotenv").config();
 
@@ -19,6 +20,7 @@ connectDb();
 
 // Routes
 app.use("/hotel", hotelRoutes);
+app.use("/visitor", visitorRoutes);
 
 app.get("/", (req, res, next) => {
   res.send("API is running...");
