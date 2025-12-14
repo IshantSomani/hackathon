@@ -193,21 +193,24 @@ router.get("/low-crowd", async (req, res) => {
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    /* ================= BUILD MATCH CONDITIONS ================= */
+    /* ================= BASE MATCH ================= */
     const telecomMatch = {
-      "location.state": state,
+      "location.state": new RegExp(`^${state}$`, "i"),
       "time_window.end": { $gte: since },
       confidence_score: { $gte: 0.5 },
     };
 
-    if (district?.trim()) {
-      telecomMatch["location.district"] = district;
-    }
-
+    /* ================= SEARCH OVERRIDES DISTRICT ================= */
     if (search?.trim()) {
+      const regex = new RegExp(search.trim(), "i");
       telecomMatch.$or = [
-        { "location.tourist_place": search },
-        { "location.city": search },
+        { "location.tourist_place": regex },
+        { "location.city": regex },
+      ];
+    } else if (district?.trim()) {
+      telecomMatch.$or = [
+        { "location.district": new RegExp(district.trim(), "i") },
+        { "location.city": new RegExp(district.trim(), "i") },
       ];
     }
 
@@ -231,14 +234,16 @@ router.get("/low-crowd", async (req, res) => {
             telecomFootfall: { $avg: "$footfall.total_devices" },
           },
         },
-        { $limit: 50 }, // ⛔ HARD CAP FOR PERFORMANCE
+        { $limit: 50 }, // performance cap
       ]),
 
       Ticket.aggregate([
         {
           $match: {
-            state,
-            ...(search?.trim() && { place: search }),
+            state: new RegExp(`^${state}$`, "i"),
+            ...(search?.trim() && {
+              place: new RegExp(`^${search.trim()}$`, "i"),
+            }),
             createdAt: { $gte: since },
           },
         },
@@ -251,14 +256,13 @@ router.get("/low-crowd", async (req, res) => {
       ]),
     ]);
 
-    /* ================= MERGE DATA ================= */
+    /* ================= MERGE ================= */
     const ticketMap = new Map(
       ticketData.map((t) => [t._id, t.ticketFootfall])
     );
 
     const merged = telecomData.map((t) => {
       const ticketCount = ticketMap.get(t._id) || 0;
-
       const crowdCount = Math.round(
         t.telecomFootfall * 0.7 + ticketCount * 0.3
       );
@@ -291,6 +295,7 @@ router.get("/low-crowd", async (req, res) => {
     });
   }
 });
+
 
 
 router.get("/high-crowd", async (req, res) => {
