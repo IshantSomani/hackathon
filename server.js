@@ -26,7 +26,7 @@ app.use("/hotel", hotelRoutes);
 app.use("/visitor", visitorRoutes);
 app.use("/dashboard", statsRoutes);
 app.use("/api", footfallRoutes);
-app.use("/api/checkin", checkinRoutes);
+app.use("/api", checkinRoutes);
 
 app.get("/", (req, res, next) => {
   res.send("API is running...");

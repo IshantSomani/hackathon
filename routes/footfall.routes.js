@@ -1,8 +1,11 @@
 const express = require("express");
+const mongoose = require("mongoose"); // ✅ FIX
 const router = express.Router();
+
 const TelecomFootfallAggregate = require("../models/TelecomFootfallAggregate");
 const Ticket = require("../models/Ticket");
 const TouristPlace = require("../models/TouristPlace");
+
 
 /**
  * GET /api/footfall
@@ -259,10 +262,19 @@ router.post("/tickets/create", async (req, res) => {
       crowdCountAtBooking,
     } = req.body;
 
+    touristType = touristType?.toUpperCase();
+
     if (!touristType || !visitors || !state || !city || !place) {
       return res.status(400).json({
         success: false,
         message: "Missing required fields",
+      });
+    }
+
+    if (!["DOMESTIC", "INTERNATIONAL"].includes(touristType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid touristType",
       });
     }
 
@@ -271,16 +283,6 @@ router.post("/tickets/create", async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Invalid visitors count",
-      });
-    }
-
-    /* 🔥 FIX ENUM MISMATCH */
-    touristType = touristType.toUpperCase();
-
-    if (!["DOMESTIC", "INTERNATIONAL"].includes(touristType)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid touristType",
       });
     }
 
@@ -316,10 +318,7 @@ router.post("/tickets/create", async (req, res) => {
           },
         },
       },
-      {
-        session,
-        upsert: true, // 🔥 critical
-      }
+      { upsert: true, session }
     );
 
     await session.commitTransaction();
@@ -333,14 +332,13 @@ router.post("/tickets/create", async (req, res) => {
     await session.abortTransaction();
     session.endSession();
 
-    console.error("Ticket create error:", err.message);
+    console.error("Ticket create error:", err);
 
     return res.status(500).json({
       success: false,
-      message: err.message, // 🔥 show real error
+      message: err.message,
     });
   }
 });
-
 
 module.exports = router;

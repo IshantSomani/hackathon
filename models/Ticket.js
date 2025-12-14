@@ -2,7 +2,6 @@ const mongoose = require("mongoose");
 
 const TicketSchema = new mongoose.Schema(
   {
-    /* ================= TOURIST TYPE ================= */
     touristType: {
       type: String,
       enum: ["DOMESTIC", "INTERNATIONAL"],
@@ -10,7 +9,6 @@ const TicketSchema = new mongoose.Schema(
       index: true,
     },
 
-    /* ================= CONTACT ================= */
     phone: {
       type: String,
       required: true,
@@ -23,7 +21,6 @@ const TicketSchema = new mongoose.Schema(
       default: null,
     },
 
-    /* ================= VISITORS ================= */
     visitors: {
       type: Number,
       required: true,
@@ -40,7 +37,6 @@ const TicketSchema = new mongoose.Schema(
       default: null,
     },
 
-    /* ================= LOCATION ================= */
     state: {
       type: String,
       required: true,
@@ -59,7 +55,6 @@ const TicketSchema = new mongoose.Schema(
       index: true,
     },
 
-    /* ================= CROWD SNAPSHOT ================= */
     crowdStatus: {
       type: String,
       enum: ["Low", "High", "Critical"],
@@ -73,13 +68,11 @@ const TicketSchema = new mongoose.Schema(
       min: 0,
     },
   },
-  {
-    timestamps: true, // createdAt & updatedAt
-  }
+  { timestamps: true }
 );
 
-/* ================= VALIDATION ================= */
-TicketSchema.pre("save", function (next) {
+/* ✅ FIXED PRE-SAVE MIDDLEWARE (NO next) */
+TicketSchema.pre("save", function () {
   if (this.touristType === "DOMESTIC") {
     this.country = null;
   }
@@ -87,22 +80,12 @@ TicketSchema.pre("save", function (next) {
   if (this.touristType === "INTERNATIONAL") {
     this.fromCity = null;
   }
-
-  next();
 });
 
-/* ================= INDEX STRATEGY ================= */
-
-// Most-used analytics queries
+/* INDEXES */
 TicketSchema.index({ state: 1, city: 1, place: 1, createdAt: -1 });
-
-// Visitor type analytics
 TicketSchema.index({ touristType: 1, createdAt: -1 });
-
-// Crowd-status analysis
 TicketSchema.index({ crowdStatus: 1, createdAt: -1 });
-
-// Phone-based lookups (optional)
 TicketSchema.index({ phone: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Ticket", TicketSchema);
