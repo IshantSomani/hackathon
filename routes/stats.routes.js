@@ -138,64 +138,83 @@ router.get("/debug/ticket-stats", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 router.get("/low-crowd", async (req, res) => {
   try {
-    const { state = "Rajasthan", district, search, limit = 6 } = req.query;
+    const {
+      state = "Rajasthan",
+      district,
+      search,
+      limit = 6,
+    } = req.query;
+
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    /* ================= TELECOM DATA ================= */
-    const telecomData = await TelecomFootfallAggregate.aggregate([
-      {
-        $match: {
-          "location.state": new RegExp(`^${state}$`, "i"),
-          "time_window.end": { $gte: since },
-          confidence_score: { $gte: 0.5 },
-        },
-      },
-      {
-        $addFields: {
-          placeName: {
-            $ifNull: ["$location.tourist_place", "$location.city"],
+    /* ================= BUILD MATCH CONDITIONS ================= */
+    const telecomMatch = {
+      "location.state": state,
+      "time_window.end": { $gte: since },
+      confidence_score: { $gte: 0.5 },
+    };
+
+    if (district?.trim()) {
+      telecomMatch["location.district"] = district;
+    }
+
+    if (search?.trim()) {
+      telecomMatch.$or = [
+        { "location.tourist_place": search },
+        { "location.city": search },
+      ];
+    }
+
+    /* ================= RUN QUERIES IN PARALLEL ================= */
+    const [telecomData, ticketData] = await Promise.all([
+      TelecomFootfallAggregate.aggregate([
+        { $match: telecomMatch },
+        {
+          $addFields: {
+            placeName: {
+              $ifNull: ["$location.tourist_place", "$location.city"],
+            },
           },
         },
-      },
-      {
-        $group: {
-          _id: "$placeName",
-          city: { $first: "$location.city" },
-          district: { $first: "$location.district" },
-          state: { $first: "$location.state" },
-          telecomFootfall: { $avg: "$footfall.total_devices" },
+        {
+          $group: {
+            _id: "$placeName",
+            city: { $first: "$location.city" },
+            district: { $first: "$location.district" },
+            state: { $first: "$location.state" },
+            telecomFootfall: { $avg: "$footfall.total_devices" },
+          },
         },
-      },
-    ]);
+        { $limit: 50 }, // ⛔ HARD CAP FOR PERFORMANCE
+      ]),
 
-    /* ================= TICKET DATA ================= */
-    const ticketData = await Ticket.aggregate([
-      {
-        $match: {
-          state,
-          createdAt: { $gte: since },
+      Ticket.aggregate([
+        {
+          $match: {
+            state,
+            ...(search?.trim() && { place: search }),
+            createdAt: { $gte: since },
+          },
         },
-      },
-      {
-        $group: {
-          _id: "$place",
-          ticketFootfall: { $sum: "$visitors" },
+        {
+          $group: {
+            _id: "$place",
+            ticketFootfall: { $sum: "$visitors" },
+          },
         },
-      },
+      ]),
     ]);
 
     /* ================= MERGE DATA ================= */
-    const ticketMap = Object.fromEntries(
+    const ticketMap = new Map(
       ticketData.map((t) => [t._id, t.ticketFootfall])
     );
 
     const merged = telecomData.map((t) => {
-      const ticketCount = ticketMap[t._id] || 0;
+      const ticketCount = ticketMap.get(t._id) || 0;
 
-      // weighted crowd calculation
       const crowdCount = Math.round(
         t.telecomFootfall * 0.7 + ticketCount * 0.3
       );
@@ -209,22 +228,26 @@ router.get("/low-crowd", async (req, res) => {
       };
     });
 
-    /* ================= FILTER LOW CROWD ================= */
+    /* ================= FINAL FILTER ================= */
     const recommendations = merged
       .filter((p) => p.crowdCount <= 15000)
       .sort((a, b) => a.crowdCount - b.crowdCount)
       .slice(0, Number(limit));
 
-    res.json({
+    return res.json({
       success: true,
       count: recommendations.length,
       recommendations,
     });
   } catch (err) {
     console.error("Low crowd error:", err);
-    res.status(500).json({ success: false });
+    return res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
   }
 });
+
 
 router.get("/high-crowd", async (req, res) => {
   try {
