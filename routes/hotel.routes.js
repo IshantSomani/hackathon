@@ -4522,95 +4522,121 @@ const hotelsBase = [
  * 🔹 GET /hotel/seed-base
  * Inserts data from hotelsBase into DB
  */
-router.get("/seed-base", async (req, res) => {
+router.post("/seed-base", async (req, res) => {
   try {
-    // Get last S_No
-    const lastHotel = await Hotel.findOne().sort({ S_No: -1 });
-    let currentSno = lastHotel ? lastHotel.S_No : 0;
+    /* ================= SAFETY CHECK ================= */
+    if (process.env.NODE_ENV === "production") {
+      return res.status(403).json({
+        success: false,
+        message: "Seeding disabled in production",
+      });
+    }
 
-    const hotelsToInsert = hotelsBase.map((hotel) => {
-      // 🎲 Random totalRooms (20–120)
+    /* ================= GET CURRENT MAX S_No ================= */
+    const lastHotel = await Hotel.findOne({}, { S_No: 1 })
+      .sort({ S_No: -1 })
+      .lean();
+
+    let currentSno = lastHotel?.S_No || 0;
+
+    /* ================= PREPARE BULK OPS ================= */
+    const bulkOps = hotelsBase.map((hotel) => {
       const totalRooms = Math.floor(Math.random() * 101) + 20;
-
-      // 🎲 Random vacancy (0 ≤ vacancy ≤ totalRooms)
       const vacancy = Math.floor(Math.random() * (totalRooms + 1));
 
-      // ⭐ Random rating if missing
       const rating =
         typeof hotel.Rating === "number"
           ? hotel.Rating
           : +(Math.random() * (5 - 3) + 3).toFixed(1);
 
       return {
-        S_No: ++currentSno,
-        Name: hotel.Name,
-        Address: hotel.Address,
-        Phone: hotel.Phone,
-        Website: hotel.Website,
-        Rating: rating,
-        Reviews: hotel.Reviews ?? null,
-        City: hotel.City,
-        category: hotel.category || "Hotel",
-        nearbyPlaces: hotel.nearbyPlaces || [],
-        totalRooms,
-        vacancy,
+        updateOne: {
+          filter: {
+            Name: hotel.Name,
+            City: hotel.City,
+          },
+          update: {
+            $setOnInsert: {
+              S_No: ++currentSno,
+              Name: hotel.Name,
+              Address: hotel.Address,
+              Phone: hotel.Phone,
+              Website: hotel.Website,
+              Rating: rating,
+              Reviews: hotel.Reviews ?? null,
+              City: hotel.City,
+              category: hotel.category || "Hotel",
+              nearbyPlaces: hotel.nearbyPlaces || [],
+              totalRooms,
+              vacancy,
+              createdAt: new Date(),
+            },
+          },
+          upsert: true, // ✅ prevents duplicates
+        },
       };
     });
 
-    await Hotel.insertMany(hotelsToInsert);
+    /* ================= EXECUTE BULK ================= */
+    const result = await Hotel.bulkWrite(bulkOps);
 
-    res.json({
+    return res.json({
       success: true,
-      inserted: hotelsToInsert.length,
-      message: "Hotels seeded successfully with random rooms & rating",
+      inserted: result.upsertedCount,
+      matchedExisting: result.matchedCount,
+      message: "Hotel base seed completed safely",
     });
   } catch (err) {
-    res.status(500).json({
+    console.error("Seed base error:", err);
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to seed hotels",
     });
   }
 });
+
 
 /**
  * 🔹 PUT /hotel/update-vacancy
  * Auto update ALL hotels every 30 sec (one-time trigger)
  */
-let vacancyInterval = null;
+async function updateHotelVacancy() {
+  const hotels = await Hotel.find(
+    {},
+    { _id: 1, vacancy: 1, totalRooms: 1 }
+  ).lean();
 
-router.put("/update-vacancy", async (req, res) => {
-  if (vacancyInterval) {
-    return res.json({
-      success: false,
-      message: "Vacancy updater already running",
-    });
+  const bulkOps = hotels.map((hotel) => {
+    const change = Math.floor(Math.random() * 5) - 2;
+    const newVacancy = Math.max(
+      0,
+      Math.min(hotel.vacancy + change, hotel.totalRooms)
+    );
+
+    return {
+      updateOne: {
+        filter: { _id: hotel._id },
+        update: { $set: { vacancy: newVacancy } },
+      },
+    };
+  });
+
+  if (bulkOps.length) {
+    await Hotel.bulkWrite(bulkOps);
   }
 
-  vacancyInterval = setInterval(async () => {
-    try {
-      const hotels = await Hotel.find();
+  console.log("✅ Vacancy updated");
+}
 
-      for (const hotel of hotels) {
-        const change = Math.floor(Math.random() * 5) - 2;
-        let newVacancy = hotel.vacancy + change;
-
-        newVacancy = Math.max(0, Math.min(newVacancy, hotel.totalRooms));
-
-        hotel.vacancy = newVacancy;
-        await hotel.save();
-      }
-
-      console.log("🔄 Vacancy auto-updated");
-    } catch (err) {
-      console.error("Vacancy update error:", err.message);
-    }
-  }, 30000);
-
-  res.json({
-    success: true,
-    message: "Auto vacancy update started (30s)",
-  });
+router.post("/cron/update-vacancy", async (req, res) => {
+  try {
+    await updateHotelVacancy();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
 });
+
 
 /**
  * 🔹 GET /hotel/list
@@ -4635,79 +4661,92 @@ router.get("/list", async (req, res) => {
 
     const filter = {};
 
-    /* ================= CITY OR NEARBY PLACE ================= */
-    if (city) {
-      const regex = new RegExp(city, "i");
-
-      filter.$or = [
-        { City: regex },
-        { nearbyPlaces: { $elemMatch: { $regex: regex } } },
-      ];
+    /* ================= SAFE CITY FILTER (NO REGEX BY DEFAULT) ================= */
+    if (city?.trim()) {
+      filter.City = city;
     }
 
     /* ================= CATEGORY ================= */
-    if (category) {
+    if (category?.trim()) {
       filter.category = category;
     }
 
     /* ================= RATING RANGE ================= */
     if (minRating || maxRating) {
       filter.Rating = {};
-      if (minRating) filter.Rating.$gte = Number(minRating);
-      if (maxRating) filter.Rating.$lte = Number(maxRating);
+      if (!isNaN(minRating)) filter.Rating.$gte = Number(minRating);
+      if (!isNaN(maxRating)) filter.Rating.$lte = Number(maxRating);
     }
 
     /* ================= VACANCY RANGE ================= */
     if (minVacancy || maxVacancy) {
       filter.vacancy = {};
-      if (minVacancy) filter.vacancy.$gte = Number(minVacancy);
-      if (maxVacancy) filter.vacancy.$lte = Number(maxVacancy);
+      if (!isNaN(minVacancy)) filter.vacancy.$gte = Number(minVacancy);
+      if (!isNaN(maxVacancy)) filter.vacancy.$lte = Number(maxVacancy);
     }
 
-    /* ================= NAME SEARCH ================= */
-    if (name) {
+    /* ================= NAME SEARCH (OPTIONAL REGEX) ================= */
+    if (name?.trim()) {
       filter.Name = { $regex: name, $options: "i" };
     }
 
-    /* ================= NEARBY PLACE (EXPLICIT) ================= */
-    if (nearbyPlace) {
-      filter.nearbyPlaces = {
-        $elemMatch: { $regex: nearbyPlace, $options: "i" },
-      };
+    /* ================= NEARBY PLACE ================= */
+    if (nearbyPlace?.trim()) {
+      filter.nearbyPlaces = nearbyPlace;
     }
 
-    /* ================= SORTING ================= */
+    /* ================= SORT WHITELIST ================= */
+    const allowedSort = [
+      "S_No",
+      "Rating",
+      "vacancy",
+      "totalRooms",
+      "Name",
+    ];
+
+    const safeSortBy = allowedSort.includes(sortBy)
+      ? sortBy
+      : "S_No";
+
     const sortOrder = order === "desc" ? -1 : 1;
-    const sortOptions = { [sortBy]: sortOrder };
+    const sortOptions = { [safeSortBy]: sortOrder };
 
     /* ================= PAGINATION ================= */
-    const skip = (Number(page) - 1) * Number(limit);
+    const pageNum = Math.max(Number(page), 1);
+    const limitNum = Math.min(Number(limit), 50);
+    const skip = (pageNum - 1) * limitNum;
 
+    /* ================= PARALLEL QUERIES ================= */
     const [hotels, total] = await Promise.all([
       Hotel.find(filter)
         .sort(sortOptions)
         .skip(skip)
-        .limit(Number(limit))
+        .limit(limitNum)
+        .select(
+          "Name City category Rating vacancy totalRooms nearbyPlaces"
+        )
         .lean(),
+
       Hotel.countDocuments(filter),
     ]);
 
-    res.json({
+    return res.json({
       success: true,
       count: hotels.length,
       total,
-      page: Number(page),
-      limit: Number(limit),
+      page: pageNum,
+      limit: limitNum,
       data: hotels,
     });
   } catch (err) {
     console.error("Hotel list error:", err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to fetch hotels",
     });
   }
 });
+
 
 
 /**
@@ -4721,18 +4760,27 @@ router.get("/analytics/city", async (req, res) => {
     /* ================= MATCH FILTER ================= */
     const matchStage = {};
 
-    if (city) {
+    if (city?.trim()) {
       matchStage.City = city;
     }
 
-    if (minRating) {
+    if (minRating && !isNaN(minRating)) {
       matchStage.Rating = { $gte: Number(minRating) };
     }
 
     const analytics = await Hotel.aggregate([
-      /* 🔥 APPLY FILTER FIRST */
+      /* 🔥 FILTER FIRST (INDEX FRIENDLY) */
+      { $match: matchStage },
+
+      /* 🔥 REDUCE PAYLOAD EARLY */
       {
-        $match: matchStage,
+        $project: {
+          City: 1,
+          category: 1,
+          Rating: 1,
+          totalRooms: { $ifNull: ["$totalRooms", 0] },
+          vacancy: { $ifNull: ["$vacancy", 0] },
+        },
       },
 
       /* Group by City + Category */
@@ -4744,8 +4792,8 @@ router.get("/analytics/city", async (req, res) => {
           },
           count: { $sum: 1 },
           avgRating: { $avg: "$Rating" },
-          totalRooms: { $sum: { $ifNull: ["$totalRooms", 0] } },
-          totalVacancy: { $sum: { $ifNull: ["$vacancy", 0] } },
+          totalRooms: { $sum: "$totalRooms" },
+          totalVacancy: { $sum: "$vacancy" },
         },
       },
 
@@ -4771,8 +4819,7 @@ router.get("/analytics/city", async (req, res) => {
         $addFields: {
           occupancyPercent: {
             $cond: [
-              { $eq: ["$totalRooms", 0] },
-              0,
+              { $gt: ["$totalRooms", 0] },
               {
                 $round: [
                   {
@@ -4789,12 +4836,13 @@ router.get("/analytics/city", async (req, res) => {
                   1,
                 ],
               },
+              0,
             ],
           },
         },
       },
 
-      /* Final shape */
+      /* Final response shape */
       {
         $project: {
           _id: 0,
@@ -4808,20 +4856,23 @@ router.get("/analytics/city", async (req, res) => {
         },
       },
 
-      /* Sort by hotel count */
+      /* Sort */
       { $sort: { totalHotels: -1 } },
     ]);
 
-    res.json({
+    return res.json({
       success: true,
+      count: analytics.length,
       data: analytics,
     });
   } catch (err) {
-    res.status(500).json({
+    console.error("City analytics error:", err);
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to fetch city analytics",
     });
   }
 });
+
 
 module.exports = router;

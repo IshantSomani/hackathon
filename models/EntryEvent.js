@@ -2,8 +2,8 @@ const mongoose = require("mongoose");
 
 const GeoLocationSchema = new mongoose.Schema(
   {
-    latitude: Number,
-    longitude: Number,
+    latitude: { type: Number, required: true },
+    longitude: { type: Number, required: true },
     accuracy: Number,
   },
   { _id: false }
@@ -11,37 +11,42 @@ const GeoLocationSchema = new mongoose.Schema(
 
 const EntryEventSchema = new mongoose.Schema(
   {
-    // ENTRY / EXIT (future proof)
+    /* ================= EVENT TYPE ================= */
     eventType: {
       type: String,
       enum: ["ENTRY", "EXIT"],
       default: "ENTRY",
+      index: true,
     },
 
-    // How the event was created
+    /* ================= SOURCE ================= */
     source: {
       type: String,
       enum: ["QR_CHECKIN", "MANUAL", "SYSTEM"],
       default: "QR_CHECKIN",
     },
 
-    // 🔑 Link to ticket
+    /* ================= REFERENCES ================= */
     ticketId: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ticket",
       required: true,
       index: true,
     },
 
     locationId: {
-      type: String,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "TouristPlace",
       required: true,
       index: true,
     },
 
+    /* ================= VISITOR ================= */
     visitorType: {
       type: String,
       enum: ["DOMESTIC", "INTERNATIONAL", "UNKNOWN"],
       required: true,
+      index: true,
     },
 
     verificationLevel: {
@@ -50,6 +55,7 @@ const EntryEventSchema = new mongoose.Schema(
       default: "SELF_DECLARED",
     },
 
+    /* ================= GEO ================= */
     geoOptedIn: {
       type: Boolean,
       default: false,
@@ -60,16 +66,33 @@ const EntryEventSchema = new mongoose.Schema(
       default: null,
     },
 
-    // When scan happened
-    timestamp: {
+    /* ================= EVENT TIME ================= */
+    occurredAt: {
       type: Date,
       default: Date.now,
       index: true,
     },
   },
   {
-    timestamps: true, // createdAt & updatedAt
+    timestamps: true, // createdAt & updatedAt (system time)
   }
 );
+
+/* ================= INDEXES ================= */
+
+// Fast analytics by location & time
+EntryEventSchema.index({ locationId: 1, occurredAt: -1 });
+
+// Visitor breakdown
+EntryEventSchema.index({ visitorType: 1, occurredAt: -1 });
+
+// Entry/Exit tracking
+EntryEventSchema.index({ eventType: 1, locationId: 1, occurredAt: -1 });
+
+// Geo analytics (optional)
+EntryEventSchema.index({
+  "geoLocation.latitude": 1,
+  "geoLocation.longitude": 1,
+});
 
 module.exports = mongoose.model("EntryEvent", EntryEventSchema);

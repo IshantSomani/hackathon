@@ -2,25 +2,28 @@ const mongoose = require("mongoose");
 
 const TicketSchema = new mongoose.Schema(
   {
-    // Tourist type
+    /* ================= TOURIST TYPE ================= */
     touristType: {
       type: String,
-      enum: ["domestic", "international"],
+      enum: ["DOMESTIC", "INTERNATIONAL"],
       required: true,
+      index: true,
     },
 
-    // Contact details
+    /* ================= CONTACT ================= */
     phone: {
       type: String,
       required: true,
+      trim: true,
+      index: true,
     },
 
     countryCode: {
       type: String,
-      default: null, // only for international
+      default: null,
     },
 
-    // Visitors info
+    /* ================= VISITORS ================= */
     visitors: {
       type: Number,
       required: true,
@@ -29,50 +32,77 @@ const TicketSchema = new mongoose.Schema(
 
     fromCity: {
       type: String,
-      default: null, // domestic only
+      default: null,
     },
 
     country: {
       type: String,
-      default: null, // international only
+      default: null,
     },
 
-    // Location info
+    /* ================= LOCATION ================= */
     state: {
       type: String,
       required: true,
+      index: true,
     },
 
     city: {
       type: String,
       required: true,
+      index: true,
     },
 
     place: {
       type: String,
       required: true,
+      index: true,
     },
 
-    // Crowd snapshot at booking time
+    /* ================= CROWD SNAPSHOT ================= */
     crowdStatus: {
       type: String,
       enum: ["Low", "High", "Critical"],
       required: true,
+      index: true,
     },
 
     crowdCountAtBooking: {
       type: Number,
       required: true,
-    },
-
-    // Metadata
-    createdAt: {
-      type: Date,
-      default: Date.now,
+      min: 0,
     },
   },
   {
-    timestamps: true, // adds createdAt & updatedAt
+    timestamps: true, // createdAt & updatedAt
   }
 );
+
+/* ================= VALIDATION ================= */
+TicketSchema.pre("save", function (next) {
+  if (this.touristType === "DOMESTIC") {
+    this.country = null;
+  }
+
+  if (this.touristType === "INTERNATIONAL") {
+    this.fromCity = null;
+  }
+
+  next();
+});
+
+/* ================= INDEX STRATEGY ================= */
+
+// Most-used analytics queries
+TicketSchema.index({ state: 1, city: 1, place: 1, createdAt: -1 });
+
+// Visitor type analytics
+TicketSchema.index({ touristType: 1, createdAt: -1 });
+
+// Crowd-status analysis
+TicketSchema.index({ crowdStatus: 1, createdAt: -1 });
+
+// Phone-based lookups (optional)
+TicketSchema.index({ phone: 1, createdAt: -1 });
+
 module.exports = mongoose.model("Ticket", TicketSchema);

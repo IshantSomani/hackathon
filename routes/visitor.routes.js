@@ -11,68 +11,92 @@ router.get("/analytics", async (req, res) => {
   try {
     const { state, city, tourist_place, startTime, endTime } = req.query;
 
-    const start = startTime ? new Date(startTime) : new Date(Date.now() - 24 * 60 * 60 * 1000);
     const end = endTime ? new Date(endTime) : new Date();
+    const start = startTime
+      ? new Date(startTime)
+      : new Date(end.getTime() - 24 * 60 * 60 * 1000);
 
-    /* ================= TELECOM ================= */
+    /* ================= TELECOM MATCH ================= */
     const telecomMatch = {
       "time_window.start": { $gte: start, $lte: end },
+      confidence_score: { $gte: 0.5 },
     };
+
     if (state) telecomMatch["location.state"] = state;
     if (city) telecomMatch["location.city"] = city;
     if (tourist_place) telecomMatch["location.tourist_place"] = tourist_place;
 
-    const telecomData = await TelecomFootfallAggregate.aggregate([
-      { $match: telecomMatch },
-      {
-        $group: {
-          _id: {
-            state: "$location.state",
-            city: "$location.city",
-            tourist_place: "$location.tourist_place",
-          },
-          telecomTotal: { $sum: "$footfall.total_devices" },
-          domesticVisitors: { $sum: "$footfall.domestic_devices" },
-          internationalVisitors: { $sum: "$footfall.international_devices" },
-          avgConfidence: { $avg: "$confidence_score" },
-        },
-      },
-    ]);
-
-    /* ================= TICKETS ================= */
+    /* ================= TICKET MATCH ================= */
     const ticketMatch = {
       createdAt: { $gte: start, $lte: end },
     };
+
     if (state) ticketMatch.state = state;
     if (city) ticketMatch.city = city;
-    if (tourist_place) {
-      ticketMatch.place = { $regex: new RegExp(`^${tourist_place}$`, "i") };
-    }
+    if (tourist_place) ticketMatch.place = tourist_place; // ❌ NO REGEX
 
-    const ticketData = await Ticket.aggregate([
-      { $match: ticketMatch },
-      {
-        $group: {
-          _id: {
-            state: "$state",
-            city: "$city",
-            tourist_place: "$place",
+    /* ================= RUN IN PARALLEL ================= */
+    const [telecomData, ticketData] = await Promise.all([
+      /* ===== TELECOM ===== */
+      TelecomFootfallAggregate.aggregate([
+        { $match: telecomMatch },
+
+        // Reduce payload early
+        {
+          $project: {
+            state: "$location.state",
+            city: "$location.city",
+            place: "$location.tourist_place",
+            total: "$footfall.total_devices",
+            domestic: "$footfall.domestic_devices",
+            international: "$footfall.international_devices",
+            confidence: "$confidence_score",
           },
-          ticketVisitors: { $sum: "$visitors" },
         },
-      },
+
+        {
+          $group: {
+            _id: {
+              state: "$state",
+              city: "$city",
+              tourist_place: "$place",
+            },
+            telecomTotal: { $sum: "$total" },
+            domesticVisitors: { $sum: "$domestic" },
+            internationalVisitors: { $sum: "$international" },
+            avgConfidence: { $avg: "$confidence" },
+          },
+        },
+      ]),
+
+      /* ===== TICKETS ===== */
+      Ticket.aggregate([
+        { $match: ticketMatch },
+        {
+          $group: {
+            _id: {
+              state: "$state",
+              city: "$city",
+              tourist_place: "$place",
+            },
+            ticketVisitors: { $sum: "$visitors" },
+          },
+        },
+      ]),
     ]);
 
     /* ================= MERGE ================= */
-    const ticketMap = {};
+    const ticketMap = new Map();
     ticketData.forEach((t) => {
-      const key = `${t._id.state}__${t._id.city}__${t._id.tourist_place}`;
-      ticketMap[key] = t.ticketVisitors;
+      ticketMap.set(
+        `${t._id.state}__${t._id.city}__${t._id.tourist_place}`,
+        t.ticketVisitors
+      );
     });
 
     const data = telecomData.map((t) => {
       const key = `${t._id.state}__${t._id.city}__${t._id.tourist_place}`;
-      const ticketVisitors = ticketMap[key] || 0;
+      const ticketVisitors = ticketMap.get(key) || 0;
 
       return {
         location: t._id,
@@ -84,15 +108,17 @@ router.get("/analytics", async (req, res) => {
       };
     });
 
-    res.json({
+    return res.json({
       success: true,
       count: data.length,
+      timeWindow: { from: start, to: end },
       data,
     });
   } catch (err) {
-    res.status(500).json({
+    console.error("Analytics error:", err);
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to fetch analytics",
     });
   }
 });
@@ -117,133 +143,120 @@ router.get("/analytics/timeseries", async (req, res) => {
       ? new Date(startTime)
       : new Date(end.getTime() - 24 * 60 * 60 * 1000);
 
+    const unit = interval === "15min" ? "minute" : "hour";
+    const binSize = interval === "15min" ? 15 : 1;
+
     /* ================= TELECOM MATCH ================= */
     const telecomMatch = {
       "time_window.start": { $gte: start, $lte: end },
+      confidence_score: { $gte: 0.5 },
+      ...(state && { "location.state": state }),
+      ...(city && { "location.city": city }),
+      ...(tourist_place && {
+        "location.tourist_place": tourist_place,
+      }),
     };
-    if (state) telecomMatch["location.state"] = state;
-    if (city) telecomMatch["location.city"] = city;
-    if (tourist_place) telecomMatch["location.tourist_place"] = tourist_place;
 
-    const timeBucket =
-      interval === "15min"
-        ? {
-            year: { $year: "$time_window.start" },
-            month: { $month: "$time_window.start" },
-            day: { $dayOfMonth: "$time_window.start" },
-            hour: { $hour: "$time_window.start" },
-            minute: {
-              $subtract: [
-                { $minute: "$time_window.start" },
-                { $mod: [{ $minute: "$time_window.start" }, 15] },
-              ],
-            },
-          }
-        : {
-            year: { $year: "$time_window.start" },
-            month: { $month: "$time_window.start" },
-            day: { $dayOfMonth: "$time_window.start" },
-            hour: { $hour: "$time_window.start" },
-          };
+    /* ================= TICKET MATCH ================= */
+    const ticketMatch = {
+      createdAt: { $gte: start, $lte: end },
+      ...(state && { state }),
+      ...(city && { city }),
+      ...(tourist_place && { place: tourist_place }), // ❌ NO REGEX
+    };
 
-    /* ================= TELECOM SERIES ================= */
-    const telecomSeries = await TelecomFootfallAggregate.aggregate([
-      { $match: telecomMatch },
-      {
-        $group: {
-          _id: {
-            time: timeBucket,
-            tourist_place: "$location.tourist_place",
-          },
-          telecomTotal: { $sum: "$footfall.total_devices" },
-          domesticVisitors: { $sum: "$footfall.domestic_devices" },
-          internationalVisitors: { $sum: "$footfall.international_devices" },
-        },
-      },
-      {
-        $project: {
-          _id: 0,
-          time: {
-            $dateFromParts: {
-              year: "$_id.time.year",
-              month: "$_id.time.month",
-              day: "$_id.time.day",
-              hour: "$_id.time.hour",
-              minute: "$_id.time.minute",
+    /* ================= RUN IN PARALLEL ================= */
+    const [telecomSeries, ticketSeries] = await Promise.all([
+      /* ===== TELECOM ===== */
+      TelecomFootfallAggregate.aggregate([
+        { $match: telecomMatch },
+
+        {
+          $project: {
+            time: {
+              $dateTrunc: {
+                date: "$time_window.start",
+                unit,
+                binSize,
+              },
             },
+            place: "$location.tourist_place",
+            total: "$footfall.total_devices",
+            domestic: "$footfall.domestic_devices",
+            international: "$footfall.international_devices",
           },
-          tourist_place: "$_id.tourist_place",
-          telecomTotal: 1,
-          domesticVisitors: 1,
-          internationalVisitors: 1,
         },
-      },
+
+        {
+          $group: {
+            _id: { time: "$time", place: "$place" },
+            telecomTotal: { $sum: "$total" },
+            domesticVisitors: { $sum: "$domestic" },
+            internationalVisitors: { $sum: "$international" },
+          },
+        },
+      ]),
+
+      /* ===== TICKETS ===== */
+      Ticket.aggregate([
+        { $match: ticketMatch },
+
+        {
+          $project: {
+            time: {
+              $dateTrunc: {
+                date: "$createdAt",
+                unit,
+                binSize,
+              },
+            },
+            visitors: "$visitors",
+            place: "$place",
+          },
+        },
+
+        {
+          $group: {
+            _id: { time: "$time", place: "$place" },
+            ticketVisitors: { $sum: "$visitors" },
+          },
+        },
+      ]),
     ]);
 
-    /* ================= TICKET SERIES ================= */
-    const ticketSeries = await Ticket.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: start, $lte: end },
-          ...(state && { state }),
-          ...(city && { city }),
-          ...(tourist_place && {
-            place: { $regex: new RegExp(`^${tourist_place}$`, "i") },
-          }),
-        },
-      },
-      {
-        $project: {
-          time: {
-            $dateTrunc: {
-              date: "$createdAt",
-              unit: interval === "15min" ? "minute" : "hour",
-              binSize: interval === "15min" ? 15 : 1,
-            },
-          },
-          visitors: "$visitors",
-          place: "$place",
-        },
-      },
-      {
-        $group: {
-          _id: { time: "$time", tourist_place: "$place" },
-          ticketVisitors: { $sum: "$visitors" },
-        },
-      },
-    ]);
-
-    /* ================= MERGE ================= */
-    const seriesMap = {};
+    /* ================= MERGE SERIES ================= */
+    const seriesMap = new Map();
 
     telecomSeries.forEach((t) => {
-      const key = `${t.time.toISOString()}__${t.tourist_place}`;
-      seriesMap[key] = {
-        time: t.time,
-        tourist_place: t.tourist_place,
+      const key = `${t._id.time.getTime()}__${t._id.place}`;
+      seriesMap.set(key, {
+        time: t._id.time,
+        tourist_place: t._id.place,
         totalVisitors: t.telecomTotal,
         domesticVisitors: t.domesticVisitors,
         internationalVisitors: t.internationalVisitors,
-      };
+      });
     });
 
     ticketSeries.forEach((t) => {
-      const key = `${t._id.time.toISOString()}__${t._id.tourist_place}`;
-      if (!seriesMap[key]) {
-        seriesMap[key] = {
+      const key = `${t._id.time.getTime()}__${t._id.place}`;
+      if (!seriesMap.has(key)) {
+        seriesMap.set(key, {
           time: t._id.time,
-          tourist_place: t._id.tourist_place,
+          tourist_place: t._id.place,
           totalVisitors: 0,
           domesticVisitors: 0,
           internationalVisitors: 0,
-        };
+        });
       }
-      seriesMap[key].totalVisitors += t.ticketVisitors;
+      seriesMap.get(key).totalVisitors += t.ticketVisitors;
     });
 
-    const data = Object.values(seriesMap).sort((a, b) => a.time - b.time);
+    const data = Array.from(seriesMap.values()).sort(
+      (a, b) => a.time - b.time
+    );
 
-    res.json({
+    return res.json({
       success: true,
       interval,
       timeRange: { start, end },
@@ -251,10 +264,10 @@ router.get("/analytics/timeseries", async (req, res) => {
       data,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({
+    console.error("Analytics timeseries error:", err);
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to fetch analytics time series",
     });
   }
 });

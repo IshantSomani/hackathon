@@ -15,76 +15,82 @@ router.get("/footfall", async (req, res) => {
   try {
     const { state = "Rajasthan", startDate, endDate } = req.query;
 
-    const since =
-      startDate || endDate
-        ? new Date(startDate || Date.now() - 24 * 60 * 60 * 1000)
-        : new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const end = endDate ? new Date(endDate) : new Date();
+    const start = startDate
+      ? new Date(startDate)
+      : new Date(end.getTime() - 24 * 60 * 60 * 1000);
 
-    /* ---------------- TELECOM DATA ---------------- */
-    const telecomData = await TelecomFootfallAggregate.aggregate([
-      {
-        $match: {
-          "location.state": state,
-          ...(startDate || endDate
-            ? {
-                "time_window.start": {
-                  ...(startDate && { $gte: new Date(startDate) }),
-                  ...(endDate && { $lte: new Date(endDate) }),
-                },
-              }
-            : {}),
+    /* ================= RUN IN PARALLEL ================= */
+    const [telecomData, ticketAgg] = await Promise.all([
+      /* ============ TELECOM DATA ============ */
+      TelecomFootfallAggregate.aggregate([
+        {
+          $match: {
+            "location.state": state,
+            "time_window.start": { $gte: start, $lte: end },
+            confidence_score: { $gte: 0.5 },
+          },
         },
-      },
-      {
-        $sort: {
-          "location.city": 1,
-          "location.tourist_place": 1,
-          "time_window.start": -1,
-        },
-      },
-      {
-        $group: {
-          _id: {
+
+        // Reduce payload early
+        {
+          $project: {
             city: "$location.city",
             place: "$location.tourist_place",
+            time: "$time_window.start",
+            total: "$footfall.total_devices",
+            domestic: "$footfall.domestic_devices",
+            international: "$footfall.international_devices",
+            confidence_score: 1,
+            international_breakdown: 1,
+            network_distribution: 1,
           },
-          total: { $first: "$footfall.total_devices" },
-          domestic: { $first: "$footfall.domestic_devices" },
-          international: { $first: "$footfall.international_devices" },
-          confidence_score: { $first: "$confidence_score" },
-          international_breakdown: { $first: "$international_breakdown" },
-          network_distribution: { $first: "$network_distribution" },
         },
-      },
+
+        // Latest record per city+place
+        {
+          $group: {
+            _id: { city: "$city", place: "$place" },
+            total: { $first: "$total" },
+            domestic: { $first: "$domestic" },
+            international: { $first: "$international" },
+            confidence_score: { $first: "$confidence_score" },
+            international_breakdown: { $first: "$international_breakdown" },
+            network_distribution: { $first: "$network_distribution" },
+          },
+        },
+      ]),
+
+      /* ============ TICKET DATA ============ */
+      Ticket.aggregate([
+        {
+          $match: {
+            state,
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              city: "$city",
+              place: "$place",
+            },
+            visitors: { $sum: "$visitors" },
+          },
+        },
+      ]),
     ]);
 
-    /* ---------------- TICKET DATA (LAST 24H) ---------------- */
-    const ticketAgg = await Ticket.aggregate([
-      {
-        $match: {
-          state,
-          createdAt: { $gte: since },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            city: "$city",
-            place: "$place",
-          },
-          visitors: { $sum: "$visitors" },
-        },
-      },
-    ]);
-
-    /* ---------------- MAP TICKETS ---------------- */
-    const ticketMap = {};
+    /* ================= MAP TICKETS ================= */
+    const ticketMap = new Map();
     ticketAgg.forEach((t) => {
-      const key = `${t._id.city}__${t._id.place}`;
-      ticketMap[key] = t.visitors;
+      ticketMap.set(
+        `${t._id.city}__${t._id.place}`,
+        t.visitors
+      );
     });
 
-    /* ---------------- MERGE ---------------- */
+    /* ================= MERGE ================= */
     const cityMap = {};
 
     telecomData.forEach((p) => {
@@ -92,7 +98,7 @@ router.get("/footfall", async (req, res) => {
       const place = p._id.place;
       const key = `${city}__${place}`;
 
-      const ticketVisitors = ticketMap[key] || 0;
+      const ticketVisitors = ticketMap.get(key) || 0;
 
       if (!cityMap[city]) {
         cityMap[city] = { places: [] };
@@ -100,23 +106,24 @@ router.get("/footfall", async (req, res) => {
 
       cityMap[city].places.push({
         name: place,
-        total: p.total + ticketVisitors, // ✅ merged
+        total: p.total + ticketVisitors,
         domestic: p.domestic,
         international: p.international,
         confidence_score: p.confidence_score,
         international_breakdown: p.international_breakdown,
         network_distribution: p.network_distribution,
-        ticketVisitors, // 🔥 optional but useful
+        ticketVisitors,
       });
     });
 
-    res.status(200).json({
+    return res.json({
       success: true,
+      timeWindow: { from: start, to: end },
       cities: cityMap,
     });
   } catch (error) {
     console.error("Footfall API error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to fetch footfall data",
     });
@@ -135,94 +142,103 @@ router.get("/footfall/series", async (req, res) => {
       });
     }
 
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
 
-    /* ================= TELECOM ================= */
-    const telecomSeries = await TelecomFootfallAggregate.aggregate([
-      {
-        $match: {
-          "location.state": state,
-          "location.city": city,
-          "location.tourist_place": tourist_place,
-          "time_window.start": { $gte: since },
-        },
-      },
-      {
-        $project: {
-          hour: {
-            $dateToString: {
-              format: "%Y-%m-%d %H:00",
-              date: "$time_window.start",
-            },
+    /* ================= RUN IN PARALLEL ================= */
+    const [telecomSeries, ticketSeries] = await Promise.all([
+      /* ============ TELECOM ============ */
+      TelecomFootfallAggregate.aggregate([
+        {
+          $match: {
+            "location.state": state,
+            "location.city": city,
+            "location.tourist_place": tourist_place,
+            "time_window.start": { $gte: start, $lte: end },
+            confidence_score: { $gte: 0.5 },
           },
-          visitors: "$footfall.total_devices",
         },
-      },
-      {
-        $group: {
-          _id: "$hour",
-          visitors: { $avg: "$visitors" },
+        {
+          $project: {
+            hour: {
+              $dateTrunc: {
+                date: "$time_window.start",
+                unit: "hour",
+              },
+            },
+            visitors: "$footfall.total_devices",
+          },
         },
-      },
+        {
+          $group: {
+            _id: "$hour",
+            visitors: { $avg: "$visitors" },
+          },
+        },
+      ]),
+
+      /* ============ TICKETS ============ */
+      Ticket.aggregate([
+        {
+          $match: {
+            state,
+            city,
+            place: tourist_place, // ❌ NO REGEX
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $project: {
+            hour: {
+              $dateTrunc: {
+                date: "$createdAt",
+                unit: "hour",
+              },
+            },
+            visitors: "$visitors",
+          },
+        },
+        {
+          $group: {
+            _id: "$hour",
+            visitors: { $sum: "$visitors" },
+          },
+        },
+      ]),
     ]);
 
-    /* ================= TICKETS (FIXED MATCH) ================= */
-    const ticketSeries = await Ticket.aggregate([
-      {
-        $match: {
-          state,
-          city,
-          place: { $regex: new RegExp(`^${tourist_place}$`, "i") },
-          createdAt: { $gte: since },
-        },
-      },
-      {
-        $project: {
-          hour: {
-            $dateToString: {
-              format: "%Y-%m-%d %H:00",
-              date: "$createdAt",
-            },
-          },
-          visitors: "$visitors",
-        },
-      },
-      {
-        $group: {
-          _id: "$hour",
-          visitors: { $sum: "$visitors" },
-        },
-      },
-    ]);
-
-    /* ================= MERGE ================= */
-    const seriesMap = {};
+    /* ================= MERGE SERIES ================= */
+    const seriesMap = new Map();
 
     telecomSeries.forEach((t) => {
-      seriesMap[t._id] = {
-        time: t._id.split(" ")[1],
+      seriesMap.set(t._id.getTime(), {
+        time: t._id,
         visitors: Math.round(t.visitors),
-      };
+      });
     });
 
     ticketSeries.forEach((t) => {
-      if (!seriesMap[t._id]) {
-        seriesMap[t._id] = {
-          time: t._id.split(" ")[1],
-          visitors: 0,
-        };
+      const key = t._id.getTime();
+      if (!seriesMap.has(key)) {
+        seriesMap.set(key, { time: t._id, visitors: 0 });
       }
-      seriesMap[t._id].visitors += t.visitors;
+      seriesMap.get(key).visitors += t.visitors;
     });
 
-    const series = Object.values(seriesMap).sort((a, b) =>
-      a.time.localeCompare(b.time)
-    );
+    const series = Array.from(seriesMap.values())
+      .sort((a, b) => a.time - b.time)
+      .map((d) => ({
+        time: d.time.toISOString().slice(11, 16), // HH:mm
+        visitors: d.visitors,
+      }));
 
-    res.json({ success: true, series });
+    return res.json({
+      success: true,
+      series,
+    });
   } catch (err) {
     console.error("Footfall series error:", err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to fetch time series",
     });
@@ -230,8 +246,9 @@ router.get("/footfall/series", async (req, res) => {
 });
 
 
-
 router.post("/tickets/create", async (req, res) => {
+  const session = await Ticket.startSession();
+
   try {
     const {
       touristType,
@@ -247,47 +264,87 @@ router.post("/tickets/create", async (req, res) => {
       crowdCountAtBooking,
     } = req.body;
 
-    // 1️⃣ Save ticket (FIXED)
-    const ticket = await Ticket.create({
-      touristType,
-      phone,
-      countryCode,
-      visitors,
-      fromCity,
-      country,
-      state,
-      city,
-      place,
-      crowdStatus,
-      crowdCountAtBooking,
-      createdAt: new Date(),
-    });
+    /* ================= VALIDATION ================= */
+    if (
+      !touristType ||
+      !visitors ||
+      !state ||
+      !city ||
+      !place
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
+    }
 
-    // 2️⃣ Update footfall
-    await TouristPlace.findOneAndUpdate(
+    const visitorCount = Number(visitors);
+    if (isNaN(visitorCount) || visitorCount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid visitors count",
+      });
+    }
+
+    session.startTransaction();
+
+    /* ================= CREATE TICKET ================= */
+    const ticket = await Ticket.create(
+      [
+        {
+          touristType,
+          phone,
+          countryCode,
+          visitors: visitorCount,
+          fromCity,
+          country,
+          state,
+          city,
+          place,
+          crowdStatus,
+          crowdCountAtBooking,
+          createdAt: new Date(),
+        },
+      ],
+      { session }
+    );
+
+    /* ================= UPDATE FOOTFALL ================= */
+    const placeUpdate = await TouristPlace.findOneAndUpdate(
       { state, city, name: place },
       {
-        $inc: { crowdCount: Number(visitors) },
+        $inc: { crowdCount: visitorCount },
         $push: {
           footfallHistory: {
             time: new Date(),
-            visitors: Number(visitors),
+            visitors: visitorCount,
           },
         },
       },
-      { upsert: true } // ✅ important safety
+      { session, new: true }
     );
 
-    res.json({
+    if (!placeUpdate) {
+      throw new Error("Tourist place not found");
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    /* ================= RESPONSE ================= */
+    return res.json({
       success: true,
       message: "Ticket created & footfall updated",
-      ticket,
+      ticketId: ticket[0]._id,
     });
   } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+
     console.error("Ticket create error:", err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: err.message,
+      message: "Failed to create ticket",
     });
   }
 });
