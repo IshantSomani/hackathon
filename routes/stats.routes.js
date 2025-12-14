@@ -297,7 +297,6 @@ router.get("/low-crowd", async (req, res) => {
 });
 
 
-
 router.get("/high-crowd", async (req, res) => {
   try {
     const {

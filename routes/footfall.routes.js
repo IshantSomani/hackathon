@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const TelecomFootfallAggregate = require("../models/TelecomFootfallAggregate");
 const Ticket = require("../models/Ticket");
-const TouristPlace = require("../models/TouristPlace"); 
+const TouristPlace = require("../models/TouristPlace");
 
 /**
  * GET /api/footfall
@@ -84,10 +84,7 @@ router.get("/footfall", async (req, res) => {
     /* ================= MAP TICKETS ================= */
     const ticketMap = new Map();
     ticketAgg.forEach((t) => {
-      ticketMap.set(
-        `${t._id.city}__${t._id.place}`,
-        t.visitors
-      );
+      ticketMap.set(`${t._id.city}__${t._id.place}`, t.visitors);
     });
 
     /* ================= MERGE ================= */
@@ -129,7 +126,6 @@ router.get("/footfall", async (req, res) => {
     });
   }
 });
-
 
 router.get("/footfall/series", async (req, res) => {
   try {
@@ -245,12 +241,11 @@ router.get("/footfall/series", async (req, res) => {
   }
 });
 
-
 router.post("/tickets/create", async (req, res) => {
-  const session = await Ticket.startSession();
+  const session = await mongoose.startSession();
 
   try {
-    const {
+    let {
       touristType,
       phone,
       countryCode,
@@ -264,14 +259,7 @@ router.post("/tickets/create", async (req, res) => {
       crowdCountAtBooking,
     } = req.body;
 
-    /* ================= VALIDATION ================= */
-    if (
-      !touristType ||
-      !visitors ||
-      !state ||
-      !city ||
-      !place
-    ) {
+    if (!touristType || !visitors || !state || !city || !place) {
       return res.status(400).json({
         success: false,
         message: "Missing required fields",
@@ -286,10 +274,19 @@ router.post("/tickets/create", async (req, res) => {
       });
     }
 
+    /* 🔥 FIX ENUM MISMATCH */
+    touristType = touristType.toUpperCase();
+
+    if (!["DOMESTIC", "INTERNATIONAL"].includes(touristType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid touristType",
+      });
+    }
+
     session.startTransaction();
 
-    /* ================= CREATE TICKET ================= */
-    const ticket = await Ticket.create(
+    const [ticket] = await Ticket.create(
       [
         {
           touristType,
@@ -303,14 +300,12 @@ router.post("/tickets/create", async (req, res) => {
           place,
           crowdStatus,
           crowdCountAtBooking,
-          createdAt: new Date(),
         },
       ],
       { session }
     );
 
-    /* ================= UPDATE FOOTFALL ================= */
-    const placeUpdate = await TouristPlace.findOneAndUpdate(
+    await TouristPlace.findOneAndUpdate(
       { state, city, name: place },
       {
         $inc: { crowdCount: visitorCount },
@@ -321,30 +316,28 @@ router.post("/tickets/create", async (req, res) => {
           },
         },
       },
-      { session, new: true }
+      {
+        session,
+        upsert: true, // 🔥 critical
+      }
     );
-
-    if (!placeUpdate) {
-      throw new Error("Tourist place not found");
-    }
 
     await session.commitTransaction();
     session.endSession();
 
-    /* ================= RESPONSE ================= */
     return res.json({
       success: true,
-      message: "Ticket created & footfall updated",
-      ticketId: ticket[0]._id,
+      ticketId: ticket._id,
     });
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
 
-    console.error("Ticket create error:", err);
+    console.error("Ticket create error:", err.message);
+
     return res.status(500).json({
       success: false,
-      message: "Failed to create ticket",
+      message: err.message, // 🔥 show real error
     });
   }
 });
