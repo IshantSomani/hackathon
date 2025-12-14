@@ -10,11 +10,9 @@ const Ticket = require("../models/Ticket");
  */
 router.get("/stats", async (req, res) => {
   try {
-    /* ================= TIME WINDOW ================= */
     const end = new Date();
     const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
 
-    /* ================= RUN ALL AGGS IN PARALLEL ================= */
     const [telecomAgg, ticketAgg, hotelAgg] = await Promise.all([
       /* ===== TELECOM ===== */
       TelecomFootfallAggregate.aggregate([
@@ -41,7 +39,7 @@ router.get("/stats", async (req, res) => {
         },
       ]),
 
-      /* ===== TICKETS ===== */
+      /* ===== TICKETS (✅ FIXED) ===== */
       Ticket.aggregate([
         {
           $match: {
@@ -53,18 +51,30 @@ router.get("/stats", async (req, res) => {
             _id: null,
             domestic: {
               $sum: {
-                $cond: [{ $eq: ["$touristType", "domestic"] }, "$visitors", 0],
+                $cond: [
+                  {
+                    $eq: [{ $toLower: "$touristType" }, "domestic"],
+                  },
+                  "$visitors",
+                  0,
+                ],
               },
             },
             international: {
               $sum: {
-                $cond: [{ $eq: ["$touristType", "international"] }, "$visitors", 0],
+                $cond: [
+                  {
+                    $eq: [{ $toLower: "$touristType" }, "international"],
+                  },
+                  "$visitors",
+                  0,
+                ],
               },
             },
           },
         },
       ]),
-
+      
       /* ===== HOTELS ===== */
       Hotel.aggregate([
         {
@@ -77,7 +87,6 @@ router.get("/stats", async (req, res) => {
       ]),
     ]);
 
-    /* ================= SAFE DEFAULTS ================= */
     const telecom = telecomAgg[0] || {
       total: 0,
       domestic: 0,
@@ -100,22 +109,15 @@ router.get("/stats", async (req, res) => {
         ? Math.round((occupiedRooms / hotel.totalRooms) * 100)
         : 0;
 
-    /* ================= RESPONSE ================= */
     return res.json({
       success: true,
-      timeWindow: {
-        last24HoursFrom: start,
-        to: end,
-      },
+      timeWindow: { from: start, to: end },
       stats: {
-        totalFootfall:
-          telecom.total + ticket.domestic + ticket.international,
+        totalFootfall: telecom.total + ticket.domestic + ticket.international,
 
-        domesticVisitors:
-          telecom.domestic + ticket.domestic,
+        domesticVisitors: telecom.domestic + ticket.domestic,
 
-        internationalVisitors:
-          telecom.international + ticket.international,
+        internationalVisitors: telecom.international + ticket.international,
 
         hotelOccupancy: occupancyRate,
       },
@@ -150,7 +152,11 @@ router.get("/debug/ticket-stats", async (req, res) => {
           },
           international: {
             $sum: {
-              $cond: [{ $eq: ["$touristType", "international"] }, "$visitors", 0],
+              $cond: [
+                { $eq: ["$touristType", "international"] },
+                "$visitors",
+                0,
+              ],
             },
           },
         },
@@ -181,15 +187,9 @@ router.get("/debug/ticket-stats", async (req, res) => {
   }
 });
 
-
 router.get("/low-crowd", async (req, res) => {
   try {
-    const {
-      state = "Rajasthan",
-      district,
-      search,
-      limit = 6,
-    } = req.query;
+    const { state = "Rajasthan", district, search, limit = 6 } = req.query;
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
@@ -257,9 +257,7 @@ router.get("/low-crowd", async (req, res) => {
     ]);
 
     /* ================= MERGE ================= */
-    const ticketMap = new Map(
-      ticketData.map((t) => [t._id, t.ticketFootfall])
-    );
+    const ticketMap = new Map(ticketData.map((t) => [t._id, t.ticketFootfall]));
 
     const merged = telecomData.map((t) => {
       const ticketCount = ticketMap.get(t._id) || 0;
@@ -296,15 +294,9 @@ router.get("/low-crowd", async (req, res) => {
   }
 });
 
-
 router.get("/high-crowd", async (req, res) => {
   try {
-    const {
-      state = "Rajasthan",
-      district,
-      search,
-      limit = 6,
-    } = req.query;
+    const { state = "Rajasthan", district, search, limit = 6 } = req.query;
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
@@ -367,9 +359,7 @@ router.get("/high-crowd", async (req, res) => {
     ]);
 
     /* ================= MERGE ================= */
-    const ticketMap = new Map(
-      ticketData.map((t) => [t._id, t.ticketFootfall])
-    );
+    const ticketMap = new Map(ticketData.map((t) => [t._id, t.ticketFootfall]));
 
     const merged = telecomData.map((t) => {
       const ticketCount = ticketMap.get(t._id) || 0;
@@ -562,8 +552,7 @@ router.get("/best-visit-insights", (req, res) => {
     },
   };
 
-  const insight =
-    insightsByState[state] || insightsByState.Rajasthan;
+  const insight = insightsByState[state] || insightsByState.Rajasthan;
 
   res.json({
     success: true,
