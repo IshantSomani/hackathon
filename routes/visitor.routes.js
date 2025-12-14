@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const TelecomFootfallAggregate = require("../models/TelecomFootfallAggregate");
+const Ticket = require("../models/Ticket");
 
 /**
  * 🔹 GET /visitor/analytics
@@ -10,21 +11,19 @@ router.get("/analytics", async (req, res) => {
   try {
     const { state, city, tourist_place, startTime, endTime } = req.query;
 
-    const match = {};
+    const start = startTime ? new Date(startTime) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const end = endTime ? new Date(endTime) : new Date();
 
-    if (state) match["location.state"] = state;
-    if (city) match["location.city"] = city;
-    if (tourist_place) match["location.tourist_place"] = tourist_place;
+    /* ================= TELECOM ================= */
+    const telecomMatch = {
+      "time_window.start": { $gte: start, $lte: end },
+    };
+    if (state) telecomMatch["location.state"] = state;
+    if (city) telecomMatch["location.city"] = city;
+    if (tourist_place) telecomMatch["location.tourist_place"] = tourist_place;
 
-    if (startTime || endTime) {
-      match["time_window.start"] = {};
-      if (startTime) match["time_window.start"].$gte = new Date(startTime);
-      if (endTime) match["time_window.start"].$lte = new Date(endTime);
-    }
-
-    const data = await TelecomFootfallAggregate.aggregate([
-      { $match: match },
-
+    const telecomData = await TelecomFootfallAggregate.aggregate([
+      { $match: telecomMatch },
       {
         $group: {
           _id: {
@@ -32,28 +31,58 @@ router.get("/analytics", async (req, res) => {
             city: "$location.city",
             tourist_place: "$location.tourist_place",
           },
-          totalVisitors: { $sum: "$footfall.total_devices" },
+          telecomTotal: { $sum: "$footfall.total_devices" },
           domesticVisitors: { $sum: "$footfall.domestic_devices" },
-          internationalVisitors: {
-            $sum: "$footfall.international_devices",
-          },
+          internationalVisitors: { $sum: "$footfall.international_devices" },
           avgConfidence: { $avg: "$confidence_score" },
         },
       },
+    ]);
 
+    /* ================= TICKETS ================= */
+    const ticketMatch = {
+      createdAt: { $gte: start, $lte: end },
+    };
+    if (state) ticketMatch.state = state;
+    if (city) ticketMatch.city = city;
+    if (tourist_place) {
+      ticketMatch.place = { $regex: new RegExp(`^${tourist_place}$`, "i") };
+    }
+
+    const ticketData = await Ticket.aggregate([
+      { $match: ticketMatch },
       {
-        $project: {
-          _id: 0,
-          location: "$_id",
-          totalVisitors: 1,
-          domesticVisitors: 1,
-          internationalVisitors: 1,
-          avgConfidence: { $round: ["$avgConfidence", 2] },
+        $group: {
+          _id: {
+            state: "$state",
+            city: "$city",
+            tourist_place: "$place",
+          },
+          ticketVisitors: { $sum: "$visitors" },
         },
       },
-
-      { $sort: { totalVisitors: -1 } },
     ]);
+
+    /* ================= MERGE ================= */
+    const ticketMap = {};
+    ticketData.forEach((t) => {
+      const key = `${t._id.state}__${t._id.city}__${t._id.tourist_place}`;
+      ticketMap[key] = t.ticketVisitors;
+    });
+
+    const data = telecomData.map((t) => {
+      const key = `${t._id.state}__${t._id.city}__${t._id.tourist_place}`;
+      const ticketVisitors = ticketMap[key] || 0;
+
+      return {
+        location: t._id,
+        totalVisitors: t.telecomTotal + ticketVisitors,
+        domesticVisitors: t.domesticVisitors,
+        internationalVisitors: t.internationalVisitors,
+        avgConfidence: Math.round(t.avgConfidence * 100) / 100,
+        ticketVisitors,
+      };
+    });
 
     res.json({
       success: true,
@@ -80,25 +109,22 @@ router.get("/analytics/timeseries", async (req, res) => {
       tourist_place,
       startTime,
       endTime,
-      interval = "hour", // hour | 15min
+      interval = "hour",
     } = req.query;
 
-    /* ================= TIME WINDOW ================= */
     const end = endTime ? new Date(endTime) : new Date();
     const start = startTime
       ? new Date(startTime)
-      : new Date(end.getTime() - 24 * 60 * 60 * 1000); // last 24h
+      : new Date(end.getTime() - 24 * 60 * 60 * 1000);
 
-    /* ================= MATCH ================= */
-    const match = {
+    /* ================= TELECOM MATCH ================= */
+    const telecomMatch = {
       "time_window.start": { $gte: start, $lte: end },
     };
+    if (state) telecomMatch["location.state"] = state;
+    if (city) telecomMatch["location.city"] = city;
+    if (tourist_place) telecomMatch["location.tourist_place"] = tourist_place;
 
-    if (state) match["location.state"] = state;
-    if (city) match["location.city"] = city;
-    if (tourist_place) match["location.tourist_place"] = tourist_place;
-
-    /* ================= TIME BUCKET ================= */
     const timeBucket =
       interval === "15min"
         ? {
@@ -120,24 +146,20 @@ router.get("/analytics/timeseries", async (req, res) => {
             hour: { $hour: "$time_window.start" },
           };
 
-    /* ================= AGGREGATION ================= */
-    const data = await TelecomFootfallAggregate.aggregate([
-      { $match: match },
-
+    /* ================= TELECOM SERIES ================= */
+    const telecomSeries = await TelecomFootfallAggregate.aggregate([
+      { $match: telecomMatch },
       {
         $group: {
           _id: {
             time: timeBucket,
             tourist_place: "$location.tourist_place",
           },
-          totalVisitors: { $sum: "$footfall.total_devices" },
+          telecomTotal: { $sum: "$footfall.total_devices" },
           domesticVisitors: { $sum: "$footfall.domestic_devices" },
-          internationalVisitors: {
-            $sum: "$footfall.international_devices",
-          },
+          internationalVisitors: { $sum: "$footfall.international_devices" },
         },
       },
-
       {
         $project: {
           _id: 0,
@@ -151,14 +173,75 @@ router.get("/analytics/timeseries", async (req, res) => {
             },
           },
           tourist_place: "$_id.tourist_place",
-          totalVisitors: 1,
+          telecomTotal: 1,
           domesticVisitors: 1,
           internationalVisitors: 1,
         },
       },
-
-      { $sort: { time: 1 } },
     ]);
+
+    /* ================= TICKET SERIES ================= */
+    const ticketSeries = await Ticket.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: start, $lte: end },
+          ...(state && { state }),
+          ...(city && { city }),
+          ...(tourist_place && {
+            place: { $regex: new RegExp(`^${tourist_place}$`, "i") },
+          }),
+        },
+      },
+      {
+        $project: {
+          time: {
+            $dateTrunc: {
+              date: "$createdAt",
+              unit: interval === "15min" ? "minute" : "hour",
+              binSize: interval === "15min" ? 15 : 1,
+            },
+          },
+          visitors: "$visitors",
+          place: "$place",
+        },
+      },
+      {
+        $group: {
+          _id: { time: "$time", tourist_place: "$place" },
+          ticketVisitors: { $sum: "$visitors" },
+        },
+      },
+    ]);
+
+    /* ================= MERGE ================= */
+    const seriesMap = {};
+
+    telecomSeries.forEach((t) => {
+      const key = `${t.time.toISOString()}__${t.tourist_place}`;
+      seriesMap[key] = {
+        time: t.time,
+        tourist_place: t.tourist_place,
+        totalVisitors: t.telecomTotal,
+        domesticVisitors: t.domesticVisitors,
+        internationalVisitors: t.internationalVisitors,
+      };
+    });
+
+    ticketSeries.forEach((t) => {
+      const key = `${t._id.time.toISOString()}__${t._id.tourist_place}`;
+      if (!seriesMap[key]) {
+        seriesMap[key] = {
+          time: t._id.time,
+          tourist_place: t._id.tourist_place,
+          totalVisitors: 0,
+          domesticVisitors: 0,
+          internationalVisitors: 0,
+        };
+      }
+      seriesMap[key].totalVisitors += t.ticketVisitors;
+    });
+
+    const data = Object.values(seriesMap).sort((a, b) => a.time - b.time);
 
     res.json({
       success: true,
@@ -175,5 +258,6 @@ router.get("/analytics/timeseries", async (req, res) => {
     });
   }
 });
+
 
 module.exports = router;

@@ -4635,45 +4635,60 @@ router.get("/list", async (req, res) => {
 
     const filter = {};
 
-    // 🔍 City filter
-    if (city) filter.City = city;
+    /* ================= CITY OR NEARBY PLACE ================= */
+    if (city) {
+      const regex = new RegExp(city, "i");
 
-    // 🔍 Category filter
-    if (category) filter.category = category;
+      filter.$or = [
+        { City: regex },
+        { nearbyPlaces: { $elemMatch: { $regex: regex } } },
+      ];
+    }
 
-    // ⭐ Rating range
+    /* ================= CATEGORY ================= */
+    if (category) {
+      filter.category = category;
+    }
+
+    /* ================= RATING RANGE ================= */
     if (minRating || maxRating) {
       filter.Rating = {};
       if (minRating) filter.Rating.$gte = Number(minRating);
       if (maxRating) filter.Rating.$lte = Number(maxRating);
     }
 
-    // 🏨 Vacancy range
+    /* ================= VACANCY RANGE ================= */
     if (minVacancy || maxVacancy) {
       filter.vacancy = {};
       if (minVacancy) filter.vacancy.$gte = Number(minVacancy);
       if (maxVacancy) filter.vacancy.$lte = Number(maxVacancy);
     }
 
-    // 🔎 Name search (case-insensitive)
+    /* ================= NAME SEARCH ================= */
     if (name) {
       filter.Name = { $regex: name, $options: "i" };
     }
 
-    // 📍 Nearby place search
+    /* ================= NEARBY PLACE (EXPLICIT) ================= */
     if (nearbyPlace) {
-      filter.nearbyPlaces = { $in: [nearbyPlace] };
+      filter.nearbyPlaces = {
+        $elemMatch: { $regex: nearbyPlace, $options: "i" },
+      };
     }
 
-    // 📊 Sorting
+    /* ================= SORTING ================= */
     const sortOrder = order === "desc" ? -1 : 1;
     const sortOptions = { [sortBy]: sortOrder };
 
-    // 📄 Pagination
+    /* ================= PAGINATION ================= */
     const skip = (Number(page) - 1) * Number(limit);
 
     const [hotels, total] = await Promise.all([
-      Hotel.find(filter).sort(sortOptions).skip(skip).limit(Number(limit)),
+      Hotel.find(filter)
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
       Hotel.countDocuments(filter),
     ]);
 
@@ -4686,9 +4701,14 @@ router.get("/list", async (req, res) => {
       data: hotels,
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error("Hotel list error:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 });
+
 
 /**
  * 🔹 GET /hotel/analytics/city

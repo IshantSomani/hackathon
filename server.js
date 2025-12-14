@@ -5,6 +5,7 @@ const hotelRoutes = require("./routes/hotel.routes");
 const visitorRoutes = require("./routes/visitor.routes");
 const statsRoutes = require("./routes/stats.routes");
 const footfallRoutes = require("./routes/footfall.routes");
+const checkinRoutes = require("./routes/checkin.routes");
 
 require("dotenv").config();
 
@@ -25,6 +26,7 @@ app.use("/hotel", hotelRoutes);
 app.use("/visitor", visitorRoutes);
 app.use("/dashboard", statsRoutes);
 app.use("/api", footfallRoutes);
+app.use("/api/checkin", checkinRoutes);
 
 app.get("/", (req, res, next) => {
   res.send("API is running...");
